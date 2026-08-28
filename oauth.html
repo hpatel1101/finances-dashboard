@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Returning to Plaid Link</title></head>
+<body>
+  <p>Returning to the local account-linking helper…</p>
+  <script>
+    const received = window.location.href;
+    const target = `http://127.0.0.1:8765/resume?received=${encodeURIComponent(received)}`;
+    window.location.replace(target);
+  </script>
+</body>
+</html>
