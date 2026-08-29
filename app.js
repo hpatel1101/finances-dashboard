@@ -109,6 +109,66 @@ function renderIncome(){
   $('incomeRows').innerHTML=rows.map(t=>`<div class="income-row"><div><div class="account-name">${escapeHtml(t.merchant||t.name||'Income')}</div><div class="tiny">${escapeHtml(t.date||'')} · ${escapeHtml(t.institution||'')} ${t.account_name?`· ${escapeHtml(t.account_name)}`:''}</div></div><div class="metric amount-in">+${money(Math.abs(Number(t.amount||0)))}</div></div>`).join('');
 }
 
+function recurringData(){
+  return snapshot.recurring_expenses || {streams:[],categories:[],monthly_equivalent_total:0,posted_this_month_total:0};
+}
+
+function recurringStreamRow(stream){
+  const charges=(stream.recent_charges||[]).map(c=>`<div class="charge-chip"><span>${escapeHtml(c.date||'')}</span><strong>${money(c.amount)}</strong></div>`).join('');
+  const account=[stream.institution,stream.account_name,stream.account_mask?`•••• ${stream.account_mask}`:''].filter(Boolean).map(escapeHtml).join(' · ');
+  return `<div class="recurring-stream">
+    <div class="recurring-stream-main">
+      <div>
+        <div class="account-name">${escapeHtml(stream.merchant||'Recurring expense')}</div>
+        <div class="tiny">${escapeHtml(stream.frequency_label||'Recurring')} · ${account}</div>
+      </div>
+      <div class="recurring-money">
+        <strong>${money(stream.monthly_equivalent)}</strong>
+        <span>est. / month</span>
+      </div>
+    </div>
+    <div class="recurring-facts">
+      <span>Latest <strong>${money(stream.latest_amount)}</strong> on ${escapeHtml(stream.last_date||'')}</span>
+      <span>Typical <strong>${money(stream.typical_amount)}</strong></span>
+      <span>This month <strong>${money(stream.posted_this_month)}</strong></span>
+      <span>Next ~ <strong>${escapeHtml(stream.next_expected_date||'')}</strong></span>
+    </div>
+    <details class="charge-history">
+      <summary>Exact recent charges (${Number(stream.occurrences||0)} detected)</summary>
+      <div class="charge-list">${charges||'<span class="muted">No recent charge detail.</span>'}</div>
+    </details>
+  </div>`;
+}
+
+function renderRecurringExpenses(){
+  const data=recurringData();
+  const streams=data.streams||[];
+  const categories=data.categories||[];
+  $('recurringSummary').innerHTML=[
+    ['Expected monthly',money(data.monthly_equivalent_total||0),'Recurring commitments normalized to a monthly estimate'],
+    ['Posted this month',money(data.posted_this_month_total||0),'Exact recurring charges already posted this month'],
+    ['Recurring merchants',String(streams.length),'Conservatively detected from transaction cadence']
+  ].map(([l,v,sub])=>`<div class="mini-summary"><div class="label">${l}</div><div class="mini-value">${v}</div><div class="sub">${sub}</div></div>`).join('');
+
+  if(!streams.length){
+    $('recurringExpenses').innerHTML='<p class="muted recurring-empty">No recurring expense patterns are confidently detected yet. More transaction history can improve detection.</p>';
+    return;
+  }
+
+  const byCategory={};
+  streams.forEach(stream=>(byCategory[stream.category] ||= []).push(stream));
+  $('recurringExpenses').innerHTML=categories.map(cat=>{
+    const catStreams=byCategory[cat.category]||[];
+    return `<details class="recurring-category">
+      <summary>
+        <span><strong>${escapeHtml(cat.category)}</strong><small>${cat.stream_count} recurring ${cat.stream_count===1?'merchant':'merchants'}</small></span>
+        <span class="recurring-category-money"><strong>${money(cat.monthly_equivalent)}</strong><small>${money(cat.posted_this_month)} posted this month</small></span>
+      </summary>
+      <div class="recurring-category-detail">${catStreams.map(recurringStreamRow).join('')}</div>
+    </details>`;
+  }).join('');
+}
+
 function renderBudgets(){
   const actual=snapshot.spending_by_category||{};
   const saved=readJson(budgetKey);
@@ -172,7 +232,7 @@ function render(){
   $('unlockView').classList.add('hidden'); $('dashboard').classList.remove('hidden');
   $('updatedAt').textContent=`Updated ${new Date(snapshot.generated_at).toLocaleString()}`;
   renderSummary(); renderAccounts(); renderCards(); renderHoldings();
-  renderCashFlowSummary(); renderIncome(); renderBudgets(); renderExpenseBreakdown(); renderCutOpportunities(); renderTransactions();
+  renderCashFlowSummary(); renderIncome(); renderRecurringExpenses(); renderBudgets(); renderExpenseBreakdown(); renderCutOpportunities(); renderTransactions();
 }
 
 $('unlockForm').addEventListener('submit',async(e)=>{
