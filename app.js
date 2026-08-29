@@ -1,15 +1,18 @@
 const $ = (id) => document.getElementById(id);
 const money = (n) => new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',maximumFractionDigits:2}).format(Number(n||0));
+const pct = (n) => `${Number.isFinite(Number(n)) ? Number(n).toFixed(1) : '0.0'}%`;
 const escapeHtml = (s='') => String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const b64bytes = (s) => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 const ownershipKey = 'money-dashboard-ownership-v1';
 const budgetKey = 'money-dashboard-budgets-v1';
+const discretionaryCategories = new Set(['Food & Drink','Shopping','Travel','Entertainment','Personal Care','Services','Other']);
 let snapshot = null;
 
 function readJson(key){ try{return JSON.parse(localStorage.getItem(key)||'{}')}catch{return {}} }
 function saveJson(key,v){ localStorage.setItem(key,JSON.stringify(v)); }
 function ownerPct(account){ const saved=readJson(ownershipKey); return Number(saved[account.account_id] ?? 100); }
 function ownedBalance(account){ return Number(account.current||0) * ownerPct(account)/100; }
+function monthStart(){ return snapshot.month_start || new Date().toISOString().slice(0,7)+'-01'; }
 
 async function decryptSnapshot(passphrase){
   const res=await fetch(`data.enc.json?t=${Date.now()}`,{cache:'no-store'});
@@ -26,7 +29,20 @@ function summaryData(){
   const depository=snapshot.accounts.filter(a=>a.type==='depository').reduce((s,a)=>s+ownedBalance(a),0);
   const credit=snapshot.accounts.filter(a=>a.type==='credit').reduce((s,a)=>s+ownedBalance(a),0);
   const investments=(snapshot.holdings||[]).reduce((s,h)=>s+Number(h.value||0),0);
-  return {net:depository+investments-credit,cash:depository,credit,investments,spend:Number(snapshot.month_spend||0)};
+  return {net:depository+investments-credit,cash:depository,credit,investments};
+}
+
+function monthlyIncome(){
+  if(snapshot.month_income !== undefined) return Number(snapshot.month_income||0);
+  return (snapshot.transactions||[]).filter(t=>!t.pending && t.date>=monthStart() && t.pfc_primary==='INCOME' && Number(t.amount)<0).reduce((s,t)=>s+Math.abs(Number(t.amount||0)),0);
+}
+
+function monthlyCashFlow(){
+  const income=monthlyIncome();
+  const expenses=Number(snapshot.month_spend||0);
+  const net=income-expenses;
+  const savingsRate=income>0 ? net/income*100 : 0;
+  return {income,expenses,net,savingsRate};
 }
 
 function renderSummary(){
@@ -34,10 +50,22 @@ function renderSummary(){
   const cards=[
     ['Tracked net worth',money(s.net),'Cash + investments − credit cards; joint ownership adjusted'],
     ['Liquid cash',money(s.cash),'Checking + savings; joint ownership adjusted'],
-    ['Credit cards owed',money(s.credit),'Current Discover + Chase balances'],
-    ['Spent this month',money(s.spend),'Purchases counted once; card repayments excluded']
+    ['Investments',money(s.investments),'Current Robinhood holdings'],
+    ['Credit cards owed',money(s.credit),'Current Discover + Chase balances']
   ];
   $('summary').innerHTML=cards.map(([l,v,sub])=>`<div class="summary-card"><div class="label">${l}</div><div class="value">${v}</div><div class="sub">${sub}</div></div>`).join('');
+}
+
+function renderCashFlowSummary(){
+  const s=monthlyCashFlow();
+  const netClass=s.net>=0?'positive':'negative';
+  const cards=[
+    ['Income received',money(s.income),'Posted income deposits this month'],
+    ['Expenses',money(s.expenses),'Purchases counted once; transfers and card payments excluded'],
+    ['Left after expenses',money(s.net),s.net>=0?'Available to save, invest, or keep as buffer':'Expenses are currently above income',netClass],
+    ['Savings rate',pct(s.savingsRate),s.income>0?'Income left after tracked expenses':'Waiting for an income deposit']
+  ];
+  $('cashFlowSummary').innerHTML=cards.map(([l,v,sub,cls=''])=>`<div class="summary-card ${cls}"><div class="label">${l}</div><div class="value">${v}</div><div class="sub">${sub}</div></div>`).join('');
 }
 
 function renderAccounts(){
@@ -67,25 +95,84 @@ function renderHoldings(){
   $('holdings').innerHTML=holdings.length?holdings.map(h=>`<div class="holding-row"><div><div class="account-name">${escapeHtml(h.ticker||h.name||'Holding')}</div><div class="tiny">${Number(h.quantity||0).toLocaleString(undefined,{maximumFractionDigits:6})} shares · ${money(h.price)} each</div></div><div class="metric">${money(h.value)}</div></div>`).join(''):'<p class="muted">Robinhood has not been linked to this dashboard yet.</p>';
 }
 
+function incomeTransactions(){
+  if(Array.isArray(snapshot.income_transactions)) return snapshot.income_transactions;
+  return (snapshot.transactions||[]).filter(t=>!t.pending && t.date>=monthStart() && t.pfc_primary==='INCOME' && Number(t.amount)<0);
+}
+
+function renderIncome(){
+  const rows=incomeTransactions().sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+  if(!rows.length){
+    $('incomeRows').innerHTML='<p class="muted">No posted income deposit has been detected for this month yet.</p>';
+    return;
+  }
+  $('incomeRows').innerHTML=rows.map(t=>`<div class="income-row"><div><div class="account-name">${escapeHtml(t.merchant||t.name||'Income')}</div><div class="tiny">${escapeHtml(t.date||'')} · ${escapeHtml(t.institution||'')} ${t.account_name?`· ${escapeHtml(t.account_name)}`:''}</div></div><div class="metric amount-in">+${money(Math.abs(Number(t.amount||0)))}</div></div>`).join('');
+}
+
 function renderBudgets(){
   const actual=snapshot.spending_by_category||{};
   const saved=readJson(budgetKey);
   const categories=snapshot.budget_categories||Object.keys(actual);
   $('budgets').innerHTML=categories.map(cat=>{
-    const spent=Number(actual[cat]||0),limit=Number(saved[cat]||0),pct=limit>0?Math.min(100,spent/limit*100):0,over=limit>0&&spent>limit;
-    return `<div class="budget-row ${over?'over':''}" data-budget-row="${escapeHtml(cat)}"><div class="budget-head"><strong>${escapeHtml(cat)}</strong><input class="budget-input" type="number" min="0" step="25" data-category="${escapeHtml(cat)}" value="${limit||''}" placeholder="Limit" /></div><div class="progress"><span style="width:${pct}%"></span></div><div class="budget-meta"><span>${money(spent)} spent</span><span>${limit?money(Math.max(0,limit-spent))+' left':'No limit set'}</span></div></div>`;
+    const spent=Number(actual[cat]||0),limit=Number(saved[cat]||0),pctUsed=limit>0?Math.min(100,spent/limit*100):0,over=limit>0&&spent>limit;
+    const remaining=limit-spent;
+    return `<div class="budget-row ${over?'over':''}" data-budget-row="${escapeHtml(cat)}"><div class="budget-head"><strong>${escapeHtml(cat)}</strong><input class="budget-input" type="number" min="0" step="25" data-category="${escapeHtml(cat)}" value="${limit||''}" placeholder="Limit" /></div><div class="progress"><span style="width:${pctUsed}%"></span></div><div class="budget-meta"><span>${money(spent)} spent</span><span>${limit?(remaining>=0?money(remaining)+' left':money(Math.abs(remaining))+' over'):'No limit set'}</span></div></div>`;
   }).join('');
 }
 
+function renderExpenseBreakdown(){
+  const actual=snapshot.spending_by_category||{};
+  const {income,expenses}=monthlyCashFlow();
+  const rows=Object.entries(actual).filter(([,amount])=>Number(amount)>0).sort((a,b)=>Number(b[1])-Number(a[1]));
+  $('expenseBreakdownBody').innerHTML=rows.length?rows.map(([cat,amount])=>`<tr><td><strong>${escapeHtml(cat)}</strong>${discretionaryCategories.has(cat)?'<div class="tiny">Flexible / reviewable</div>':''}</td><td class="right">${money(amount)}</td><td class="right">${pct(expenses>0?Number(amount)/expenses*100:0)}</td><td class="right">${pct(income>0?Number(amount)/income*100:0)}</td></tr>`).join(''):'<tr><td colspan="4" class="muted">No posted expenses this month.</td></tr>';
+}
+
+function renderCutOpportunities(){
+  const actual=snapshot.spending_by_category||{};
+  const saved=readJson(budgetKey);
+  const opportunities=[];
+  for(const [cat,raw] of Object.entries(actual)){
+    const spent=Number(raw||0);
+    if(spent<=0) continue;
+    const limit=Number(saved[cat]||0);
+    if(limit>0 && spent>limit){
+      opportunities.push({cat,amount:spent-limit,label:`Over budget by ${money(spent-limit)}`,reason:'Bring this category back to your limit.'});
+    }else if(discretionaryCategories.has(cat)){
+      const potential=spent*0.15;
+      if(potential>=10) opportunities.push({cat,amount:potential,label:`15% cut = ${money(potential)}`,reason:`Current spend is ${money(spent)}.`});
+    }
+  }
+  opportunities.sort((a,b)=>b.amount-a.amount);
+  const top=opportunities.slice(0,4);
+  if(!top.length){
+    $('cutOpportunities').innerHTML='<p class="muted">Set category budgets or accumulate more spending this month and I’ll rank the clearest places to reduce expenses.</p>';
+    return;
+  }
+  const total=top.reduce((s,x)=>s+x.amount,0);
+  $('cutOpportunities').innerHTML=`<div class="cut-total"><span>Potential monthly reduction</span><strong>${money(total)}</strong></div>`+top.map((x,i)=>`<div class="cut-row"><div class="cut-rank">${i+1}</div><div><div class="account-name">${escapeHtml(x.cat)}</div><div class="tiny">${escapeHtml(x.reason)}</div></div><div class="cut-amount">${escapeHtml(x.label)}</div></div>`).join('')+'<p class="tiny cut-note">Reduction estimates are simple targets, not financial advice. Use them to choose where you want to tighten spending.</p>';
+}
+
 function renderTransactions(){
-  const rows=(snapshot.transactions||[]).slice(0,60);
-  $('transactionsBody').innerHTML=rows.map(t=>{ const amount=Number(t.amount||0),out=amount>=0; return `<tr><td>${escapeHtml(t.date)}</td><td><div class="account-name">${escapeHtml(t.merchant||t.name||'Transaction')}</div>${t.pending?'<div class="tiny">Pending</div>':''}</td><td>${escapeHtml(t.institution)}<div class="tiny">${escapeHtml(t.account_name||'')}</div></td><td>${escapeHtml(t.category||'Other')}</td><td class="right ${out?'amount-out':'amount-in'}">${out?'-':'+'}${money(Math.abs(amount))}</td></tr>` }).join('');
+  const rows=(snapshot.transactions||[]).filter(t=>t.date>=monthStart()).slice(0,100);
+  $('transactionsBody').innerHTML=rows.length?rows.map(t=>{
+    const amount=Number(t.amount||0),out=amount>=0;
+    const category=t.pfc_primary==='INCOME'?'Income':(t.category||'Other');
+    return `<tr><td>${escapeHtml(t.date)}</td><td><div class="account-name">${escapeHtml(t.merchant||t.name||'Transaction')}</div>${t.pending?'<div class="tiny">Pending</div>':''}</td><td>${escapeHtml(t.institution)}<div class="tiny">${escapeHtml(t.account_name||'')}</div></td><td>${escapeHtml(category)}</td><td class="right ${out?'amount-out':'amount-in'}">${out?'-':'+'}${money(Math.abs(amount))}</td></tr>`;
+  }).join(''):'<tr><td colspan="5" class="muted">No current-month activity yet.</td></tr>';
+}
+
+function setupTabs(){
+  document.querySelectorAll('.tab-button').forEach(button=>button.addEventListener('click',()=>{
+    document.querySelectorAll('.tab-button').forEach(b=>b.classList.toggle('active',b===button));
+    document.querySelectorAll('.tab-panel').forEach(panel=>panel.classList.toggle('hidden',panel.id!==button.dataset.tab));
+  }));
 }
 
 function render(){
   $('unlockView').classList.add('hidden'); $('dashboard').classList.remove('hidden');
   $('updatedAt').textContent=`Updated ${new Date(snapshot.generated_at).toLocaleString()}`;
-  renderSummary(); renderAccounts(); renderCards(); renderHoldings(); renderBudgets(); renderTransactions();
+  renderSummary(); renderAccounts(); renderCards(); renderHoldings();
+  renderCashFlowSummary(); renderIncome(); renderBudgets(); renderExpenseBreakdown(); renderCutOpportunities(); renderTransactions();
 }
 
 $('unlockForm').addEventListener('submit',async(e)=>{
@@ -95,5 +182,7 @@ $('unlockForm').addEventListener('submit',async(e)=>{
 });
 
 $('saveBudgets').addEventListener('click',()=>{
-  const saved={}; document.querySelectorAll('.budget-input').forEach(el=>saved[el.dataset.category]=Number(el.value||0)); saveJson(budgetKey,saved); renderBudgets();
+  const saved={}; document.querySelectorAll('.budget-input').forEach(el=>saved[el.dataset.category]=Number(el.value||0)); saveJson(budgetKey,saved); renderBudgets(); renderCutOpportunities();
 });
+
+setupTabs();
