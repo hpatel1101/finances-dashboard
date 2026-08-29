@@ -1,6 +1,6 @@
 const $ = (id) => document.getElementById(id);
 const money = (n) => new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',maximumFractionDigits:2}).format(Number(n||0));
-const escapeHtml = (s='') => String(s).replace(/[&<>'\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','\"':'&quot;'}[c]));
+const escapeHtml = (s='') => String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const b64bytes = (s) => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 const ownershipKey = 'money-dashboard-ownership-v1';
 const budgetKey = 'money-dashboard-budgets-v1';
